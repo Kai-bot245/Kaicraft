@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Kaicraft 6.0</title>
+<style>
+html,body{height:100%;margin:0;background:#7ec0ee;}
+canvas{display:block;width:100%;height:100%;}
+#ui { position: absolute; left:10px; top:10px; background:rgba(255,255,255,0.8); padding:6px; border-radius:6px; font-family:monospace; }
+#crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 20px;
+  height: 20px;
+  margin-left: -10px;
+  margin-top: -10px;
+  pointer-events: none;
+}
+#crosshair:before, #crosshair:after { content: ''; position: absolute; background: white; }
+#crosshair:before { left: 9px; top: 0; width: 2px; height: 20px; }
+#crosshair:after { top: 9px; left: 0; width: 20px; height: 2px; }
+
+#hotbar {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+}
+.hotbar-slot {
+  width: 40px;
+  height: 40px;
+  border: 2px solid white;
+  background: #333;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#crosshair{
+position: fixed;
+    height: 50%;
+    width: 50%;
+    color: white;
+}
+.hotbar-slot.selected { border-color: yellow; }
+.hotbar-slot canvas { width: 32px; height: 32px; }
+</style>
+</head>
+<body>
+<div id="crosshair"></div>    
+<div id="hotbar"></div>
+<canvas id="gl"></canvas>
+<script>
+// =================== SETTINGS ===================
+const CHUNK_SIZE = 16;
+const MAX_HEIGHT = 48;
+let RENDER_RADIUS = 1;
+const VIEW_DISTANCE = RENDER_RADIUS * CHUNK_SIZE;
+const BLOCK_DRAW_LIMIT = MAX_HEIGHT;
+
+// =================== WEBGL SETUP ===================
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl', { antialias: true });
+if(!gl){ alert('WebGL not available'); throw new Error('WebGL not available'); }
+function resize(){ canvas.width=innerWidth; canvas.height=innerHeight; gl.viewport(0,0,canvas.width,canvas.height); }
+addEventListener('resize', resize); resize();
+
+// =================== SHADERS ===================
+const vs = `attribute vec3 aPos; attribute vec2 aUV; uniform mat4 uMVP; varying vec2 vUV; void main(){vUV=aUV;gl_Position=uMVP*vec4(aPos,1.0);}`;
+const fs = `precision mediump float; varying vec2 vUV; uniform sampler2D uTex; void main(){ gl_FragColor = texture2D(uTex,vUV); }`;
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const aPosLoc = gl.getAttribLocation(prog,'aPos');
+const aUVLoc = gl.getAttribLocation(prog,'aUV');
+const uMVPLoc = gl.getUniformLocation(prog,'uMVP');
+const uTexLoc = gl.getUniformLocation(prog,'uTex');
+const vbo = gl.createBuffer();
+
+// =================== TEXTURE ATLAS ===================
+const atlasSize = 64;
+const atlas = document.createElement('canvas');
+atlas.width = atlas.height = atlasSize;
+const ctx = atlas.getContext('2d');
+function drawRect(x,y,w,h,color){ctx.fillStyle=color;ctx.fillRect(x,y,w,h);}
+drawRect(0,0,32,32,'#3ca02c'); // Grass top
+drawRect(32,0,32,32,'#8b5a2b'); // Dirt side
+drawRect(0,32,32,32,'#888');    // Stone
+drawRect(32,32,16,16,'#7b4f23'); // Log top
+drawRect(48,32,16,16,'#5a3210'); // Log side
+drawRect(32,48,32,16,'#228B22'); // Leaves
+
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D,tex);
+gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,atlas);
+gl.generateMipmap(gl.TEXTURE_2D);
+
+// =================== BLOCK TYPES ===================
+const BLOCK = { AIR:0, GRASS:1, DIRT:2, STONE:3, LOG:4, LEAVES:5 };
+
+// UV mapping
+const UV = {
+  GRASS_TOP:  [0/64,0/64, 32/64,0/64, 32/64,32/64, 0/64,32/64],
+  GRASS_SIDE: [32/64,0/64, 64/64,0/64, 64/64,32/64, 32/64,32/64],
+  DIRT:       [32/64,0/64, 64/64,0/64, 64/64,32/64, 32/64,32/64],
+  STONE:      [0/64,32/64, 32/64,32/64, 32/64,64/64, 0/64,64/64],
+  LOG_TOP:    [32/64,32/64, 48/64,32/64, 48/64,48/64, 32/64,48/64],
+  LOG_SIDE:   [48/64,32/64, 64/64,32/64, 64/64,48/64, 48/64,48/64],
+  LEAVES:     [32/64,48/64, 64/64,48/64, 64/64,64/64, 32/64,64/64]
+};
+
+// =================== WORLD ===================
+function bKey(x,y,z){ return `${x},${y},${z}`; }
+const worldBlocks = new Map();
+const chunkGenerated = new Set();
+function getBlock(x,y,z){ const k=bKey(x,y,z); return worldBlocks.get(k)||BLOCK.AIR; }
+function setBlockExplicit(x,y,z,type){ const k=bKey(x,y,z); if(type===BLOCK.AIR) worldBlocks.delete(k); else worldBlocks.set(k,type); vertexArray=null; }
+
+// =================== WORLD GENERATION ===================
+// NOTE: you said you're using Perlin noise — keeping your noise-style formula but you can swap to a Perlin function easily.
+// The tree placement logic remains the same.
+function generateAndPersistChunk(cx,cz){
+  const chunkKey = `${cx},${cz}`;
+  if(chunkGenerated.has(chunkKey)) return;
+  chunkGenerated.add(chunkKey);
+  const noiseScale = 0.06;
+  for(let lx=0; lx<CHUNK_SIZE; lx++){
+    for(let lz=0; lz<CHUNK_SIZE; lz++){
+      const wx = cx*CHUNK_SIZE + lx;
+      const wz = cz*CHUNK_SIZE + lz;
+      const n = Math.sin(wx*noiseScale*2)*Math.cos(wz*noiseScale*2);
+      let height = Math.floor((n+1)*0.5*(MAX_HEIGHT-10))+6;
+      height = Math.max(1,Math.min(MAX_HEIGHT-1,height));
+      for(let y=0;y<MAX_HEIGHT;y++){
+        let type = BLOCK.DIRT;
+        if(y===height-1) type=BLOCK.GRASS;
+        else if(y<Math.max(1,height-6)) type=BLOCK.STONE;
+        if(y>height-1) continue;
+        setBlockExplicit(wx,y,wz,type);
+      }
+      // Trees
+      if(getBlock(wx,height-1,wz)===BLOCK.GRASS && Math.random()<0.02){
+        const treeHeight = 3 + Math.floor(Math.random()*2);
+        for(let y=height;y<height+treeHeight;y++) setBlockExplicit(wx,y,wz,BLOCK.LOG);
+        const leafStart = height+treeHeight-1;
+        for(let lx2=-1; lx2<=1; lx2++){
+          for(let ly2=0; ly2<=2; ly2++){
+            for(let lz2=-1; lz2<=1; lz2++){
+              if(lx2===0 && lz2===0 && ly2===2) continue;
+              const bx=wx+lx2, by=leafStart+ly2, bz=wz+lz2;
+              if(getBlock(bx,by,bz)===BLOCK.AIR) setBlockExplicit(bx,by,bz,BLOCK.LEAVES);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// =================== CHUNK MANAGEMENT ===================
+const chunks = new Set();
+function chunkKey(cx,cz){ return `${cx},${cz}`;}
+function ensureChunks(cx,cz,radius){
+  for(let dx=-radius;dx<=radius;dx++){
+    for(let dz=-radius;dz<=radius;dz++){
+      const ccx=cx+dx, ccz=cz+dz;
+      const key=chunkKey(ccx,ccz);
+      if(!chunkGenerated.has(key)) generateAndPersistChunk(ccx,ccz);
+      chunks.add(key);
+    }
+  }
+}
+function unloadFar(cx,cz,radius){
+  for(const key of Array.from(chunks)){
+    const [ccx,ccz]=key.split(',').map(Number);
+    if(Math.abs(ccx-cx)>radius || Math.abs(ccz-cz)>radius) chunks.delete(key);
+  }
+}
+
+// =================== MESH BUILDING ===================
+function buildVisibleMesh(camX,camZ,radius){
+  const verts=[];
+  const camChunkX = Math.floor(camX/CHUNK_SIZE);
+  const camChunkZ = Math.floor(camZ/CHUNK_SIZE);
+  for(let dx=-radius;dx<=radius;dx++){
+    for(let dz=-radius;dz<=radius;dz++){
+      const cx=camChunkX+dx, cz=camChunkZ+dz;
+      const key=chunkKey(cx,cz);
+      if(!chunkGenerated.has(key)) continue;
+      for(let lx=0;lx<CHUNK_SIZE;lx++){
+        for(let lz=0;lz<CHUNK_SIZE;lz++){
+          const wx=cx*CHUNK_SIZE+lx;
+          const wz=cz*CHUNK_SIZE+lz;
+          for(let y=0;y<MAX_HEIGHT;y++){
+            const type=getBlock(wx,y,wz);
+            if(type===BLOCK.AIR) continue;
+            function uvForFace(face){
+              // face will be 'top', 'bottom' or 'side'
+              if(type===BLOCK.GRASS) return face==='top'?UV.GRASS_TOP:UV.GRASS_SIDE;
+              if(type===BLOCK.DIRT) return UV.DIRT;
+              if(type===BLOCK.STONE) return UV.STONE;
+              // IMPORTANT: logs use LOG_TOP for both top and bottom
+              if(type===BLOCK.LOG) return (face==='top' || face==='bottom')?UV.LOG_TOP:UV.LOG_SIDE;
+              if(type===BLOCK.LEAVES) return UV.LEAVES;
+              return UV.DIRT;
+            }
+            // top face (y+1 empty)
+            if(getBlock(wx,y+1,wz)===BLOCK.AIR) pushFace(verts,wx,y,wz,'top',uvForFace('top'));
+            // bottom face (y-1 empty)
+            if(getBlock(wx,y-1,wz)===BLOCK.AIR) pushFace(verts,wx,y,wz,'bottom',uvForFace('bottom'));
+            // sides
+            if(getBlock(wx+1,y,wz)===BLOCK.AIR) pushFace(verts,wx,y,wz,'px',uvForFace('side'));
+            if(getBlock(wx-1,y,wz)===BLOCK.AIR) pushFace(verts,wx,y,wz,'nx',uvForFace('side'));
+            if(getBlock(wx,y,wz+1)===BLOCK.AIR) pushFace(verts,wx,y,wz,'pz',uvForFace('side'));
+            if(getBlock(wx,y,wz-1)===BLOCK.AIR) pushFace(verts,wx,y,wz,'nz',uvForFace('side'));
+          }
+        }
+      }
+    }
+  }
+  return new Float32Array(verts);
+}
+
+function pushFace(out,x,y,z,dir,uv){
+  // uv is [u0,v0, u1,v1, u2,v2, u3,v3]
+  const [u0,v0,u1,v1,u2,v2,u3,v3]=uv;
+  if(dir==='top'){
+    // top (y+1)
+    out.push(
+      x,   y+1, z,   u0, v0,
+      x+1, y+1, z,   u1, v1,
+      x+1, y+1, z+1, u2, v2
+    );
+    out.push(
+      x,   y+1, z,   u0, v0,
+      x+1, y+1, z+1, u2, v2,
+      x,   y+1, z+1, u3, v3
+    );
+  } else if(dir==='bottom'){
+    // bottom (y)
+    // winding mirrored so normal points down
+    out.push(
+      x,   y, z+1, u0, v0,
+      x+1, y, z+1, u1, v1,
+      x+1, y, z,   u2, v2
+    );
+    out.push(
+      x,   y, z+1, u0, v0,
+      x+1, y, z,   u2, v2,
+      x,   y, z,   u3, v3
+    );
+  } else if(dir==='px'){
+    out.push(
+      x+1,y,z,   u0,v0,
+      x+1,y+1,z, u1,v1,
+      x+1,y+1,z+1,u2,v2
+    );
+    out.push(
+      x+1,y,z,   u0,v0,
+      x+1,y+1,z+1,u2,v2,
+      x+1,y,z+1, u3,v3
+    );
+  } else if(dir==='nx'){
+    out.push(
+      x,y,z+1,   u0,v0,
+      x,y+1,z+1, u1,v1,
+      x,y+1,z,   u2,v2
+    );
+    out.push(
+      x,y,z+1,   u0,v0,
+      x,y+1,z,   u2,v2,
+      x,y,z,     u3,v3
+    );
+  } else if(dir==='pz'){
+    out.push(
+      x+1,y,z+1, u0,v0,
+      x+1,y+1,z+1,u1,v1,
+      x,  y+1,z+1,u2,v2
+    );
+    out.push(
+      x+1,y,z+1, u0,v0,
+      x,  y+1,z+1,u2,v2,
+      x,  y,z+1,  u3,v3
+    );
+  } else if(dir==='nz'){
+    out.push(
+      x,y,z,     u0,v0,
+      x,y+1,z,   u1,v1,
+      x+1,y+1,z, u2,v2
+    );
+    out.push(
+      x,y,z,     u0,v0,
+      x+1,y+1,z, u2,v2,
+      x+1,y,z,   u3,v3
+    );
+  }
+}
+
+// =================== CAMERA / INPUT ===================
+const keysDown={};
+window.addEventListener('keydown', e=>keysDown[e.code]=true);
+window.addEventListener('keyup', e=>keysDown[e.code]=false);
+const MOVE_SPEED=0.12, TURN_SPEED=0.035;
+
+let lastChunkX=null,lastChunkZ=null,vertexArray=null,vertexCount=0;
+function rebuildMeshIfNeeded(){
+  const chunkX=Math.floor(cam.x/CHUNK_SIZE);
+  const chunkZ=Math.floor(cam.z/CHUNK_SIZE);
+  if(chunkX!==lastChunkX || chunkZ!==lastChunkZ || !vertexArray){
+    lastChunkX=chunkX; lastChunkZ=chunkZ;
+    ensureChunks(chunkX,chunkZ,RENDER_RADIUS);
+    unloadFar(chunkX,chunkZ,RENDER_RADIUS);
+    vertexArray=buildVisibleMesh(cam.x,cam.z,RENDER_RADIUS);
+    vertexCount=vertexArray.length/5;
+    gl.bindBuffer(gl.ARRAY_BUFFER,vbo);
+    gl.bufferData(gl.ARRAY_BUFFER,vertexArray,gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(aPosLoc);
+    gl.vertexAttribPointer(aPosLoc,3,gl.FLOAT,false,5*4,0);
+    gl.enableVertexAttribArray(aUVLoc);
+    gl.vertexAttribPointer(aUVLoc,2,gl.FLOAT,false,5*4,3*4);
+  }
+}
+
+
+function getSurfaceY(x, z) {
+  for (let y = MAX_HEIGHT - 1; y >= 0; y--) {
+    if (getBlock(x, y, z) !== BLOCK.AIR) {
+      return y + 2; // two block above surface (your original choice)
+    }
+  }
+  return MAX_HEIGHT; // fallback
+}
+
+// pick spawn position (chunk must be generated first)
+const spawnX = 0;
+const spawnZ = 0;
+generateAndPersistChunk(Math.floor(spawnX/CHUNK_SIZE), Math.floor(spawnZ/CHUNK_SIZE));
+let spawnY = getSurfaceY(spawnX, spawnZ);
+
+// set camera at surface
+let cam = { x: spawnX + 0.5, y: spawnY + 0.5, z: spawnZ + 0.5 }, yaw=0, pitch=-0.2;
+// =================== HOTBAR / INVENTORY ===================
+const hotbarEl = document.getElementById('hotbar');
+let selectedSlot = 0;
+const hotbarItems = [BLOCK.GRASS,BLOCK.DIRT,BLOCK.STONE,BLOCK.LOG,BLOCK.LEAVES];
+function createHotbar(){
+  for(let i=0;i<5;i++){
+    const slot = document.createElement('div');
+    slot.className='hotbar-slot'+(i===selectedSlot?' selected':'');
+    const miniCanvas=document.createElement('canvas');
+    miniCanvas.width=32; miniCanvas.height=32;
+    const miniCtx=miniCanvas.getContext('2d');
+    drawMiniBlock(miniCtx,hotbarItems[i]);
+    slot.appendChild(miniCanvas);
+    hotbarEl.appendChild(slot);
+  }
+}
+function drawMiniBlock(ctx,type){
+  ctx.clearRect(0,0,32,32);
+  if(type===BLOCK.GRASS){ ctx.fillStyle='#3ca02c'; ctx.fillRect(0,0,32,16); ctx.fillStyle='#8b5a2b'; ctx.fillRect(0,16,32,16);}
+  else if(type===BLOCK.DIRT){ ctx.fillStyle='#8b5a2b'; ctx.fillRect(0,0,32,32);}
+  else if(type===BLOCK.STONE){ ctx.fillStyle='#888'; ctx.fillRect(0,0,32,32);}
+  else if(type===BLOCK.LOG){ ctx.fillStyle='#7b4f23'; ctx.fillRect(0,0,32,16); ctx.fillStyle='#5a3210'; ctx.fillRect(0,16,32,16);}
+  else if(type===BLOCK.LEAVES){ ctx.fillStyle='#228B22'; ctx.fillRect(0,0,32,32);}
+}
+createHotbar();
+window.addEventListener('keydown',e=>{
+  if(e.code.startsWith('Digit')){ 
+    const n=parseInt(e.code[5])-1; 
+    if(n>=0 && n<5){ 
+      selectedSlot = n;
+      Array.from(hotbarEl.children).forEach((c,i)=>c.classList.toggle('selected',i===n));
+    }
+  }
+});
+
+// =================== RAYCAST / PLACING / BREAKING ===================
+function castBlock(){
+  const dir = [Math.sin(yaw)*Math.cos(pitch), Math.sin(pitch), Math.cos(yaw)*Math.cos(pitch)];
+  let ox = cam.x, oy = cam.y, oz = cam.z;
+  let target = null, prev = null;
+  for(let i=0; i<6; i+=0.05){
+    const bx = Math.floor(ox + dir[0]*i);
+    const by = Math.floor(oy + dir[1]*i);
+    const bz = Math.floor(oz + dir[2]*i);
+    if(getBlock(bx,by,bz) !== BLOCK.AIR){ target = [bx,by,bz]; break; }
+    prev = [bx,by,bz];
+  }
+  return {target, placePos: prev};
+}
+
+window.addEventListener('keydown', e=>{
+  if(e.code==='KeyB'){ const {target} = castBlock(); if(target) setBlockExplicit(...target, BLOCK.AIR); }
+  if(e.code==='KeyP'){ const {placePos} = castBlock(); if(placePos) setBlockExplicit(...placePos, hotbarItems[selectedSlot]); }
+});
+
+// =================== RENDER LOOP ===================
+function perspective(fovy,aspect,near,far){
+  const f = 1/Math.tan(fovy/2);
+  const nf = 1/(near-far);
+  const m = new Float32Array(16);
+  m[0]=f/aspect; m[5]=f; m[10]=(far+near)*nf; m[11]=-1; m[14]=2*far*near*nf;
+  return m;
+}
+
+function lookAt(eye,center,up){
+  const f=[center[0]-eye[0], center[1]-eye[1], center[2]-eye[2]];
+  const l = Math.hypot(...f); f[0]/=l; f[1]/=l; f[2]/=l;
+  const s=[f[1]*up[2]-f[2]*up[1], f[2]*up[0]-f[0]*up[2], f[0]*up[1]-f[1]*up[0]];
+  const sl = Math.hypot(...s); s[0]/=sl; s[1]/=sl; s[2]/=sl;
+  const u=[s[1]*f[2]-s[2]*f[1], s[2]*f[0]-s[0]*f[2], s[0]*f[1]-s[1]*f[0]];
+  const m = new Float32Array(16);
+  m[0]=s[0]; m[1]=u[0]; m[2]=-f[0]; m[4]=s[1]; m[5]=u[1]; m[6]=-f[1];
+  m[8]=s[2]; m[9]=u[2]; m[10]=-f[2]; m[12]=-s[0]*eye[0]-s[1]*eye[1]-s[2]*eye[2];
+  m[13]=-u[0]*eye[0]-u[1]*eye[1]-u[2]*eye[2]; m[14]=f[0]*eye[0]+f[1]*eye[1]+f[2]*eye[2]; m[15]=1;
+  return m;
+}
+
+function multiply(a,b){
+  const r = new Float32Array(16);
+  for(let i=0;i<4;i++){ for(let j=0;j<4;j++){ let s=0; for(let k=0;k<4;k++) s+=a[k*4+i]*b[j*4+k]; r[j*4+i]=s; } }
+  return r;
+}
+
+// =================== MOVEMENT STEP ===================
+function step(){
+  if(keysDown['ArrowLeft']) yaw += TURN_SPEED;
+  if(keysDown['ArrowRight']) yaw -= TURN_SPEED;
+  if(keysDown['ArrowUp']) pitch = Math.max(-Math.PI/2+0.01, pitch + TURN_SPEED);
+  if(keysDown['ArrowDown']) pitch = Math.min(Math.PI/2-0.01, pitch - TURN_SPEED);
+
+  let dx=0,dz=0,dy=0;
+  if(keysDown['KeyW']) { dx += Math.sin(yaw); dz += Math.cos(yaw); }
+  if(keysDown['KeyS']) { dx -= Math.sin(yaw); dz -= Math.cos(yaw); }
+  if(keysDown['KeyA']) { dx += Math.cos(yaw); dz -= Math.sin(yaw); }
+  if(keysDown['KeyD']) { dx -= Math.cos(yaw); dz += Math.sin(yaw); }
+  if(keysDown['Space']) dy += MOVE_SPEED;
+  if(keysDown['ShiftLeft']||keysDown['ShiftRight']) dy -= MOVE_SPEED;
+
+  const len = Math.hypot(dx,dy,dz);
+  if(len>0){ dx/=len; dy/=len; dz/=len; dx*=MOVE_SPEED; dy*=MOVE_SPEED; dz*=MOVE_SPEED; }
+
+  cam.x += dx; cam.y += dy; cam.z += dz;
+  rebuildMeshIfNeeded();
+}
+
+// =================== MAIN RENDER ===================
+function render(){
+  step();
+  gl.clearColor(0.53,0.81,0.92,1);
+   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+
+  const aspect = canvas.width / canvas.height;
+  const proj = perspective(Math.PI / 3, aspect, 0.1, 1000);
+
+  const dir = [
+    Math.sin(yaw) * Math.cos(pitch),
+    Math.sin(pitch),
+    Math.cos(yaw) * Math.cos(pitch)
+  ];
+  const center = [cam.x + dir[0], cam.y + dir[1], cam.z + dir[2]];
+  const view = lookAt([cam.x, cam.y, cam.z], center, [0,1,0]);
+
+  const mvp = multiply(proj, view);
+  gl.uniformMatrix4fv(uMVPLoc, false, mvp);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform1i(uTexLoc, 0);
+
+  if(vertexArray && vertexCount>0){
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.enableVertexAttribArray(aPosLoc);
+    gl.vertexAttribPointer(aPosLoc,3,gl.FLOAT,false,5*4,0);
+    gl.enableVertexAttribArray(aUVLoc);
+    gl.vertexAttribPointer(aUVLoc,2,gl.FLOAT,false,5*4,3*4);
+    gl.drawArrays(gl.TRIANGLES,0,vertexCount);
+  }
+
+  requestAnimationFrame(render);
+}
+
+render();
+</script>
+</body>
+</html>
