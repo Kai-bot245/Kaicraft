@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Kaicraft BETA</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; color: white; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 10px; height: 10px; border: 2px solid white; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; z-index: 5; }
+        #ui-container { position: absolute; bottom: 100px; left: 50%; transform: translateX(-50%); width: 240px; z-index: 10; }
+        .bar { height: 10px; margin: 4px 0; border: 2px solid #000; background: #333; overflow: hidden; }
+        #health-fill { width: 100%; background: #ff4d4d; height: 100%; transition: width 0.2s; }
+        #oxygen-fill { width: 100%; background: #4da6ff; height: 100%; transition: width 0.2s; }
+        #hotbar { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; background: rgba(0,0,0,0.8); padding: 8px; border: 3px solid #555; z-index: 10; }
+        .slot { width: 45px; height: 45px; border: 4px solid #444; display: flex; align-items: center; justify-content: center; }
+        .slot.active { border-color: #fff; background: #666; transform: scale(1.1); }
+        .icon { width: 28px; height: 28px; }
+        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 20; }
+        .menu-card { background: #333; padding: 30px; border: 4px solid #555; text-align: center; min-width: 350px; }
+        .hidden { display: none !important; }
+        button { padding: 10px; background: #555; color: white; border: 2px solid #888; cursor: pointer; margin-top: 5px; width: 100%; }
+        input { width: 90%; padding: 10px; margin-bottom: 10px; background: #222; color: white; border: 1px solid #555; }
+    </style>
+</head>
+<body>
+    <div id="crosshair" class="hidden"></div>
+    <div id="ui-container" class="hidden">
+        <div class="bar"><div id="health-fill"></div></div>
+        <div id="oxygen-bar" class="bar" style="opacity:0;"><div id="oxygen-fill"></div></div>
+    </div>
+    <div id="hotbar" class="hidden">
+        <div id="slot-0" class="slot active"><div class="icon" style="background:#5b8c3f"></div></div>
+        <div id="slot-1" class="slot"><div class="icon" style="background:#79553c"></div></div>
+        <div id="slot-2" class="slot"><div class="icon" style="background:#2980b9"></div></div>
+        <div id="slot-3" class="slot"><div class="icon" style="background:#e67e22"></div></div>
+        <div id="slot-4" class="slot"><div class="icon" style="background:#333"></div></div>
+    </div>
+
+    <div id="main-menu" class="overlay">
+        <div class="menu-card">
+            <h1>Kaicraft BETA</h1>
+            <div id="world-list"></div>
+            <input type="text" id="new-world-name" placeholder="New World Name...">
+            <button onclick="createNewWorld()">Create New World</button>
+        </div>
+    </div>
+
+    <div id="pause-menu" class="overlay hidden">
+        <div class="menu-card">
+            <h2>PAUSED</h2>
+            <button onclick="resumeGame()">Resume Game</button>
+            <button onclick="manualSave()">Save World</button>
+            <button onclick="exitToMenu()">Exit to Menu</button>
+        </div>
+    </div>
+
+    <script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }</script>
+    <script type="module">
+        import * as THREE from 'three';
+
+        let currentWorldName = "", isPaused = true, blocks = [], keys = {}, velocity = new THREE.Vector3();
+        let selectedIndex = 0, health = 100, oxygen = 100;
+        let worldData = {};
+        let gameTime = 1.6; 
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const player = new THREE.Group();
+        player.add(camera); 
+        scene.add(player);
+
+        const sun = new THREE.DirectionalLight(0xffffff, 0.8); scene.add(sun);
+        const ambient = new THREE.AmbientLight(0xffffff, 0.3); scene.add(ambient);
+        const raycaster = new THREE.Raycaster();
+
+        function createTex(colors) {
+            const canvas = document.createElement('canvas'); canvas.width = 16; canvas.height = 16;
+            const ctx = canvas.getContext('2d');
+            for(let i=0; i<16; i++) for(let j=0; j<16; j++) {
+                ctx.fillStyle = colors[Math.floor(Math.random()*colors.length)]; ctx.fillRect(i,j,1,1);
+            }
+            const t = new THREE.CanvasTexture(canvas); t.magFilter = THREE.NearestFilter; return t;
+        }
+
+        const materials = [
+            new THREE.MeshStandardMaterial({ map: createTex(['#5b8c3f', '#4e7935']) }),
+            new THREE.MeshStandardMaterial({ map: createTex(['#614126', '#79553c']) }),
+            new THREE.MeshStandardMaterial({ map: createTex(['#2980b9', '#3498db']), transparent: true, opacity: 0.6 }),
+            new THREE.MeshStandardMaterial({ map: createTex(['#e67e22', '#d35400']), emissive: '#e67e22', emissiveIntensity: 0.5 }),
+            new THREE.MeshStandardMaterial({ map: createTex(['#222', '#111', '#333']) })
+        ];
+
+        window.addBlock = (x, y, z, matIndex) => {
+            const key = `${x},${y},${z}`;
+            if (blocks.find(b => b.userData.key === key)) return;
+            const b = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), materials[matIndex]);
+            b.position.set(x, y, z);
+            b.userData.type = matIndex; 
+            b.userData.key = key; 
+            scene.add(b); 
+            blocks.push(b);
+            worldData[key] = matIndex; 
+        };
+
+        window.respawnPlayer = () => {
+    health = 100;
+    oxygen = 100;
+    velocity.set(0, 0, 0);
+
+    let spawnY = 5; 
+    // Search from sky down to find the floor
+    for (let y = 25; y > -10; y--) {
+        if (worldData[`0,${y},0`] !== undefined) {
+            // y + 2.0 ensures your collision box (which goes down to -1.55) 
+            // is safely above the block (y + 0.5)
+            spawnY = y + 2.1; 
+            break;
+        }
+    }
+
+    // Spawn at 0, 0 but perfectly centered so you don't clip edges
+    player.position.set(0, spawnY, 0);
+
+    // Reset UI
+    document.getElementById('health-fill').style.width = '100%';
+    document.getElementById('oxygen-fill').style.width = '100%';
+};
+
+        window.startWorld = (name, isNew) => {
+            currentWorldName = name;
+            while(blocks.length > 0) { const b = blocks.pop(); scene.remove(b); }
+            worldData = {};
+            if(isNew) { 
+                for (let x = -12; x < 12; x++) {
+                    for (let z = -12; z < 12; z++) {
+                        const h = Math.floor(Math.sin(x/4) * Math.cos(z/4) * 3);
+                        for(let y = h; y >= -4; y--) worldData[`${x},${y},${z}`] = (y === h) ? 0 : 1;
+                    }
+                }
+            } else { 
+                const saved = JSON.parse(localStorage.getItem(`mc_save_${name}`)); 
+                if(saved) saved.forEach(d => worldData[`${d.pos[0]},${d.pos[1]},${d.pos[2]}`] = d.type); 
+            }
+            for (let key in worldData) {
+                const [x, y, z] = key.split(',').map(Number);
+                addBlock(x, y, z, worldData[key]);
+            }
+            document.querySelectorAll('.hidden').forEach(el => el.classList.remove('hidden'));
+            document.getElementById('main-menu').classList.add('hidden');
+            respawnPlayer(); isPaused = false; document.body.requestPointerLock();
+        };
+
+        function checkCollisions(pos) {
+            const pBB = { 
+                min: new THREE.Vector3(pos.x-0.2, pos.y-1.55, pos.z-0.2), 
+                max: new THREE.Vector3(pos.x+0.2, pos.y+0.1, pos.z+0.2) 
+            };
+            for (let b of blocks) {
+                if (b.userData.type === 2 || b.userData.type === 3) continue;
+                if (b.position.distanceTo(pos) > 2.2) continue;
+                const bBB = { min: new THREE.Vector3(b.position.x-0.5, b.position.y-0.5, b.position.z-0.5), max: new THREE.Vector3(b.position.x+0.5, b.position.y+0.5, b.position.z+0.5) };
+                if (pBB.max.x > bBB.min.x && pBB.min.x < bBB.max.x && pBB.max.y > bBB.min.y && pBB.min.y < bBB.max.y && pBB.max.z > bBB.min.z && pBB.min.z < bBB.max.z) return true;
+            }
+            return false;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (isPaused) return;
+
+            const delta = 0.016; 
+
+            gameTime += 0.000058; 
+            const sunAngle = gameTime;
+            sun.position.set(Math.cos(sunAngle)*20, Math.sin(sunAngle)*20, 10);
+            const dayFactor = Math.max(0, Math.sin(sunAngle)); 
+            sun.intensity = dayFactor * 1.2;
+            ambient.intensity = dayFactor * 0.3 + 0.05;
+            const skyColor = new THREE.Color();
+            skyColor.lerpColors(new THREE.Color(0x020210), new THREE.Color(0x4080ff), dayFactor);
+            scene.background = skyColor;
+
+            const px = Math.round(player.position.x);
+            const pyHead = Math.round(player.position.y);
+            const pyFeet = Math.round(player.position.y - 1);
+            const pz = Math.round(player.position.z);
+
+            const headInWater = worldData[`${px},${pyHead},${pz}`] === 2;
+            const inLava = worldData[`${px},${pyHead},${pz}`] === 3 || worldData[`${px},${pyFeet},${pz}`] === 3;
+            const inWater = headInWater || worldData[`${px},${pyFeet},${pz}`] === 2;
+
+            if (headInWater) {
+                oxygen = Math.max(0, oxygen - 25 * delta); 
+                if (oxygen <= 0) health -= 10 * delta; 
+            } else {
+                oxygen = Math.min(100, oxygen + 50 * delta); 
+            }
+            if (inLava) health -= 60 * delta;
+
+            document.getElementById('health-fill').style.width = health + '%';
+            document.getElementById('oxygen-fill').style.width = oxygen + '%';
+            document.getElementById('oxygen-bar').style.opacity = headInWater ? 1 : 0;
+
+            if (health <= 0 || player.position.y < -20) respawnPlayer();
+
+            if (inWater) {
+                velocity.y = keys['Space'] ? 2 * delta : -0.5 * delta;
+            } else if (inLava) {
+                velocity.y = keys['Space'] ? 1 * delta : -0.2 * delta;
+            } else {
+                velocity.y -= 20 * delta * delta;
+            }
+
+            const move = new THREE.Vector3();
+            if (keys['KeyW']) move.z -= 1; if (keys['KeyS']) move.z += 1;
+            if (keys['KeyA']) move.x -= 1; if (keys['KeyD']) move.x += 1;
+            const speed = (inWater || inLava) ? 2.5 : 5;
+            move.normalize().applyAxisAngle(new THREE.Vector3(0,1,0), player.rotation.y).multiplyScalar(speed * delta);
+
+            player.position.x += move.x; if (checkCollisions(player.position)) player.position.x -= move.x;
+            player.position.z += move.z; if (checkCollisions(player.position)) player.position.z -= move.z;
+            player.position.y += velocity.y;
+            if (checkCollisions(player.position)) { 
+                player.position.y -= velocity.y; 
+                velocity.y = (keys['Space'] && !inWater && !inLava) ? 0.15 : 0; 
+            }
+            renderer.render(scene, camera);
+        }
+
+        // --- WORLD MANAGEMENT ---
+window.deleteWorld = (name) => {
+    if (confirm(`Are you sure you want to delete "${name}"? This cannot be undone.`)) {
+        // 1. Remove the actual world data
+        localStorage.removeItem(`mc_save_${name}`);
+
+        // 2. Remove the name from the world index list
+        let worldList = JSON.parse(localStorage.getItem('mc_world_index') || '[]');
+        worldList = worldList.filter(worldName => worldName !== name);
+        localStorage.setItem('mc_world_index', JSON.stringify(worldList));
+
+        // 3. Refresh the menu so the world disappears
+        refreshWorldList();
+    }
+};
+        window.manualSave = () => {
+            if (!currentWorldName) return;
+            const saveArray = [];
+            for (let key in worldData) {
+                const [x, y, z] = key.split(',').map(Number);
+                saveArray.push({ pos: [x, y, z], type: worldData[key] });
+            }
+            localStorage.setItem(`mc_save_${currentWorldName}`, JSON.stringify(saveArray));
+            let worldList = JSON.parse(localStorage.getItem('mc_world_index') || '[]');
+            if (!worldList.includes(currentWorldName)) {
+                worldList.push(currentWorldName);
+                localStorage.setItem('mc_world_index', JSON.stringify(worldList));
+            }
+            alert("Saved!");
+        };
+
+       window.refreshWorldList = () => {
+    const worldList = JSON.parse(localStorage.getItem('mc_world_index') || '[]');
+    const container = document.getElementById('world-list');
+    
+    if (worldList.length === 0) {
+        container.innerHTML = "<p style='color: #888;'>No saved worlds</p>";
+        return;
+    }
+
+    container.innerHTML = worldList.map(name => `
+        <div style="display:flex; justify-content:space-between; align-items:center; background:#444; margin:5px 0; padding:8px; border:2px solid #555;">
+            <span style="font-weight:bold;">${name}</span>
+            <div style="display:flex; gap:5px;">
+                <button style="width:60px; margin:0; padding:5px; background:#4a4;" onclick="startWorld('${name}', false)">Load</button>
+                <button style="width:60px; margin:0; padding:5px; background:#a44;" onclick="deleteWorld('${name}')">Del</button>
+            </div>
+        </div>
+    `).join('');
+};
+
+        // --- INPUTS ---
+        document.addEventListener('keydown', (e) => { 
+            keys[e.code] = true; 
+            if (['1','2','3','4','5'].includes(e.key)) {
+                selectedIndex = parseInt(e.key)-1;
+                document.querySelectorAll('.slot').forEach((s, i) => s.classList.toggle('active', i === selectedIndex));
+            }
+        });
+        document.addEventListener('keyup', (e) => keys[e.code] = false);
+        document.addEventListener('mousemove', (e) => { if(!isPaused) { player.rotation.y -= e.movementX * 0.002; camera.rotation.x = Math.max(-1.5, Math.min(1.5, camera.rotation.x - e.movementY * 0.002)); } });
+        document.addEventListener('pointerlockchange', () => { isPaused = document.pointerLockElement !== document.body; document.getElementById('pause-menu').classList.toggle('hidden', !isPaused); });
+        
+        window.createNewWorld = () => { const n = document.getElementById('new-world-name').value; if(n) startWorld(n, true); };
+        window.resumeGame = () => { isPaused = false; document.body.requestPointerLock(); };
+        window.exitToMenu = () => location.reload();
+        window.oncontextmenu = (e) => e.preventDefault();
+
+        window.addEventListener('mousedown', (e) => {
+            if (isPaused) return;
+            raycaster.setFromCamera(new THREE.Vector2(), camera);
+            const hits = raycaster.intersectObjects(blocks);
+            if (hits.length > 0 && hits[0].distance < 6) {
+                const hit = hits[0];
+                const pos = hit.object.position;
+                if (e.button === 0) {
+                    scene.remove(hit.object);
+                    blocks = blocks.filter(b => b !== hit.object);
+                    delete worldData[`${pos.x},${pos.y},${pos.z}`];
+                } else if (e.button === 2) {
+                    const n = hit.face.normal;
+                    const nx = pos.x + n.x, ny = pos.y + n.y, nz = pos.z + n.z;
+                    addBlock(nx, ny, nz, selectedIndex);
+                }
+            }
+        });
+
+        refreshWorldList();
+        animate();
+    </script>
+</body>
+</html>
