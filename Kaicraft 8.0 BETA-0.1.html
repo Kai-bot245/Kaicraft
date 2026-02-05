@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Kaicraft Beta</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; color: white; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 15px; height: 15px; border: 2px solid white; transform: translate(-50%, -50%); pointer-events: none; z-index: 5; }
+        #ui-container { position: absolute; bottom: 100px; left: 50%; transform: translateX(-50%); width: 240px; z-index: 10; }
+        .bar { height: 10px; margin: 4px 0; border: 2px solid #000; background: #333; overflow: hidden; }
+        #health-fill { width: 100%; background: #ff4d4d; height: 100%; transition: width 0.2s; }
+        #oxygen-fill { width: 100%; background: #4da6ff; height: 100%; transition: width 0.2s; }
+        #damage-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255, 0, 0, 0); pointer-events: none; z-index: 15; transition: background 0.1s; }
+        #hotbar { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; background: rgba(0,0,0,0.8); padding: 8px; border: 3px solid #555; z-index: 10; }
+        .slot { width: 45px; height: 45px; border: 4px solid #444; display: flex; align-items: center; justify-content: center; }
+        .slot.active { border-color: #fff; background: #666; }
+        .icon { width: 28px; height: 28px; image-rendering: pixelated; }
+        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 20; }
+        .menu-card { background: #333; padding: 30px; border: 4px solid #555; text-align: center; min-width: 350px; }
+        .world-item { display: flex; gap: 5px; margin-bottom: 5px; }
+        .world-item button { flex-grow: 1; margin-top: 0; }
+        .delete-btn { background: #822 !important; width: 40px; flex-grow: 0 !important; }
+        button { padding: 10px; background: #555; color: white; border: 2px solid #888; cursor: pointer; font-family: inherit; margin-top: 5px; }
+        input { width: 90%; padding: 10px; margin-bottom: 10px; background: #222; color: white; border: 1px solid #555; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <div id="damage-overlay"></div>
+    <div id="crosshair" class="hidden"></div>
+    <div id="ui-container" class="hidden">
+        <div class="bar"><div id="health-fill"></div></div>
+        <div id="oxygen-bar" class="bar" style="opacity:0;"><div id="oxygen-fill"></div></div>
+    </div>    <div id="hotbar" class="hidden">
+
+        <div id="slot-0" class="slot active"><div class="icon" style="background:#5b8c3f"></div></div>
+        <div id="slot-1" class="slot"><div class="icon" style="background:#79553c"></div></div>
+        <div id="slot-2" class="slot"><div class="icon" style="background:#2980b9"></div></div>
+        <div id="slot-3" class="slot"><div class="icon" style="background:#e67e22"></div></div>
+        <div id="slot-4" class="slot"><div class="icon" style="background:#777"></div></div>
+    </div>
+    <div id="main-menu" class="overlay">
+        <div class="menu-card">
+            <h1>Kaicraft BETA</h1>
+            <div id="world-list"></div>
+            <input type="text" id="new-world-name" placeholder="New World Name...">
+            <button onclick="createNewWorld()" style="width: 100%;">Create New World</button>
+        </div>
+    </div>
+    <div id="pause-menu" class="overlay hidden">
+        <div class="menu-card">
+            <h2>PAUSED</h2>
+            <button onclick="resumeGame()" style="width: 100%;">Resume Game</button>
+            <button onclick="manualSave()" style="width: 100%;">Save World</button>
+            <button onclick="exitToMenu()" style="width: 100%;">Exit to Menu</button>
+        </div>
+    </div>
+
+    <script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }</script>
+    <script type="module">
+        import * as THREE from 'three';
+        let currentWorldName = "", isPaused = true, blocks = [], keys = {}, velocity = new THREE.Vector3();
+        let selectedIndex = 0, time = 0, health = 100, oxygen = 100, lastDamageTime = 0;
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const player = new THREE.Group();
+        player.add(camera); scene.add(player);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4); scene.add(ambientLight);
+        const sun = new THREE.DirectionalLight(0xffffff, 0.8); scene.add(sun);
+
+        function createTex(colors) {
+            const canvas = document.createElement('canvas'); canvas.width = 16; canvas.height = 16;
+            const ctx = canvas.getContext('2d');
+            for(let i=0; i<16; i++) for(let j=0; j<16; j++) {
+                ctx.fillStyle = colors[Math.floor(Math.random()*colors.length)]; ctx.fillRect(i,j,1,1);
+            }
+            const t = new THREE.CanvasTexture(canvas); t.magFilter = THREE.NearestFilter; return t;
+        }
+
+        const materials = [
+            new THREE.MeshStandardMaterial({ map: createTex(['#5b8c3f', '#4e7935']) }), 
+            new THREE.MeshStandardMaterial({ map: createTex(['#614126', '#79553c']) }), 
+            new THREE.MeshStandardMaterial({ map: createTex(['#2980b9', '#3498db']), transparent: true, opacity: 0.6 }), 
+            new THREE.MeshStandardMaterial({ map: createTex(['#e67e22', '#d35400']), emissive: '#e67e22', emissiveIntensity: 0.5 }), 
+            new THREE.MeshStandardMaterial({ map: createTex(['#666', '#777', '#555', '#444']) }) 
+        ];
+
+        window.addBlock = (x, y, z, matIndex) => {
+            const b = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), materials[matIndex]);
+            b.position.set(Math.round(x), Math.round(y), Math.round(z));
+            b.userData.type = matIndex; scene.add(b); blocks.push(b);
+        };
+
+        window.updateWorldListUI = () => {
+            const container = document.getElementById('world-list');
+            container.innerHTML = "";
+            const registry = JSON.parse(localStorage.getItem('mc_registry') || '[]');
+            registry.forEach(name => {
+                const item = document.createElement('div');
+                item.className = 'world-item';
+                item.innerHTML = `<button onclick="startWorld('${name}', false)">Load: ${name}</button><button class="delete-btn" onclick="deleteWorld('${name}')">X</button>`;
+                container.appendChild(item);
+            });
+        }
+
+        window.deleteWorld = (name) => {
+            if(confirm(`Delete world "${name}"?`)) {
+                localStorage.removeItem(`mc_save_${name}`);
+                let registry = JSON.parse(localStorage.getItem('mc_registry') || '[]');
+                registry = registry.filter(n => n !== name);
+                localStorage.setItem('mc_registry', JSON.stringify(registry));
+                updateWorldListUI();
+            }
+        };
+
+        window.createNewWorld = () => {
+            const name = document.getElementById('new-world-name').value.trim();
+            if(name) startWorld(name, true);
+        };
+
+        window.manualSave = () => {
+            const data = blocks.map(b => ({ pos: [b.position.x, b.position.y, b.position.z], type: b.userData.type }));
+            localStorage.setItem(`mc_save_${currentWorldName}`, JSON.stringify(data));
+            let registry = JSON.parse(localStorage.getItem('mc_registry') || '[]');
+            if(!registry.includes(currentWorldName)) registry.push(currentWorldName);
+            localStorage.setItem('mc_registry', JSON.stringify(registry));
+            alert("Saved!");
+        };
+
+        window.startWorld = (name, isNew) => {
+            currentWorldName = name; health = 100; oxygen = 100; time = 1.5;
+            while(blocks.length > 0) { const b = blocks.pop(); scene.remove(b); }
+            if(isNew) { for (let x = -8; x < 8; x++) for (let z = -8; z < 8; z++) addBlock(x, 0, z, 0); } 
+            else { 
+                const saved = JSON.parse(localStorage.getItem(`mc_save_${name}`)); 
+                if(saved) saved.forEach(d => addBlock(d.pos[0], d.pos[1], d.pos[2], d.type)); 
+            }
+            document.getElementById('main-menu').classList.add('hidden');
+            document.getElementById('hotbar').classList.remove('hidden');
+            document.getElementById('ui-container').classList.remove('hidden');
+            document.getElementById('crosshair').classList.remove('hidden');
+            player.position.set(0, 5, 0); isPaused = false; document.body.requestPointerLock();
+        };
+
+        window.resumeGame = () => { isPaused = false; document.getElementById('pause-menu').classList.add('hidden'); document.body.requestPointerLock(); };
+        window.exitToMenu = () => location.reload();
+        updateWorldListUI();
+
+        document.addEventListener('pointerlockchange', () => {
+            isPaused = document.pointerLockElement !== document.body;
+            document.getElementById('pause-menu').classList.toggle('hidden', !isPaused);
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if(isPaused) return; keys[e.code] = true;
+            if (['1','2','3','4','5'].includes(e.key)) {
+                selectedIndex = parseInt(e.key) - 1;
+                document.querySelectorAll('.slot').forEach((s, i) => s.classList.toggle('active', i === selectedIndex));
+            }
+        });
+        document.addEventListener('keyup', (e) => keys[e.code] = false);
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isPaused) {
+                player.rotation.y -= e.movementX * 0.002;
+                camera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, camera.rotation.x - e.movementY * 0.002));
+            }
+        });
+
+        window.addEventListener('mousedown', (e) => {
+            if (isPaused) return;
+            const ray = new THREE.Raycaster(); ray.setFromCamera(new THREE.Vector2(), camera);
+            const hits = ray.intersectObjects(blocks);
+            if (hits.length > 0) {
+                if (e.button === 0) { scene.remove(hits[0].object); blocks.splice(blocks.indexOf(hits[0].object), 1); }
+                else if (e.button === 2) {
+                    const p = hits[0].object.position.clone().add(hits[0].face.normal);
+                    const roundedP = { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) };
+                    
+                    // ANTI-STUCK PLACEMENT LOGIC
+                    const hOverlap = Math.abs(player.position.x - roundedP.x) < 0.7 && Math.abs(player.position.z - roundedP.z) < 0.7;
+                    const vOverlap = (roundedP.y >= Math.floor(player.position.y - 1.5) && roundedP.y <= Math.ceil(player.position.y));
+
+                    if (!(hOverlap && vOverlap)) {
+                        addBlock(p.x, p.y, p.z, selectedIndex);
+                    }
+                }
+            }
+        });
+
+        function checkCollisions(pos) {
+            const pBB = { min: new THREE.Vector3(pos.x-0.3, pos.y-1.6, pos.z-0.3), max: new THREE.Vector3(pos.x+0.3, pos.y+0.2, pos.z+0.3) };
+            for (const b of blocks) {
+                if (b.userData.type === 2 || b.userData.type === 3) continue;
+                const bBB = { min: new THREE.Vector3(b.position.x-0.5, b.position.y-0.5, b.position.z-0.5), max: new THREE.Vector3(b.position.x+0.5, b.position.y+0.5, b.position.z+0.5) };
+                if (pBB.max.x > bBB.min.x && pBB.min.x < bBB.max.x && pBB.max.y > bBB.min.y && pBB.min.y < bBB.max.y && pBB.max.z > bBB.min.z && pBB.min.z < bBB.max.z) return true;
+            }
+            return false;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (isPaused) return;
+            const delta = 0.016;
+            time += 0.0015;
+
+            // Day/Night
+            const skyLight = Math.max(0.05, Math.sin(time) * 0.5 + 0.5);
+            scene.background = new THREE.Color().setHSL(0.6, 0.4, skyLight * 0.6);
+            sun.position.set(Math.cos(time)*20, Math.sin(time)*20, 5);
+            sun.intensity = Math.max(0, Math.sin(time)) * 1.5;
+            ambientLight.intensity = skyLight * 0.4 + 0.1;
+
+            // Fluid Check
+            const headB = blocks.find(b => Math.round(b.position.x) === Math.round(player.position.x) && Math.round(b.position.y) === Math.round(player.position.y) && Math.round(b.position.z) === Math.round(player.position.z));
+            const footB = blocks.find(b => Math.round(b.position.x) === Math.round(player.position.x) && Math.round(b.position.y) === Math.round(player.position.y-1) && Math.round(b.position.z) === Math.round(player.position.z));
+            const sub = headB?.userData.type === 2;
+            const lava = (headB?.userData.type === 3 || footB?.userData.type === 3);
+            const water = (footB?.userData.type === 2);
+
+            // ANTI-STUCK NUDGE
+            const isStuck = blocks.some(b => b.userData.type < 2 && Math.abs(b.position.x - player.position.x) < 0.4 && Math.abs(b.position.z - player.position.z) < 0.4 && Math.abs(b.position.y - (player.position.y - 0.5)) < 0.5);
+            if (isStuck) player.position.y += 0.1;
+
+            let speed = lava ? 1.5 : (water ? 3 : 5);
+            if (sub) { oxygen = Math.max(0, oxygen - 25 * delta); if (oxygen <= 0) health -= 15 * delta; } else { oxygen = Math.min(100, oxygen + 60 * delta); }
+
+            if (lava && Date.now() - lastDamageTime > 500) {
+                health -= 20; lastDamageTime = Date.now();
+                document.getElementById('damage-overlay').style.background = "rgba(255,0,0,0.5)";
+                setTimeout(() => document.getElementById('damage-overlay').style.background = "rgba(0,0,0,0)", 100);
+            }
+
+            document.getElementById('health-fill').style.width = health + '%';
+            document.getElementById('oxygen-fill').style.width = oxygen + '%';
+            document.getElementById('oxygen-bar').style.opacity = sub ? 1 : 0;
+
+            if (water || lava) velocity.y = keys['Space'] ? 3 * delta : -1.5 * delta;
+            else velocity.y -= 22 * delta * delta;
+
+            const move = new THREE.Vector3();
+            if (keys['KeyW']) move.z -= 1; if (keys['KeyS']) move.z += 1;
+            if (keys['KeyA']) move.x -= 1; if (keys['KeyD']) move.x += 1;
+            move.normalize().applyAxisAngle(new THREE.Vector3(0,1,0), player.rotation.y).multiplyScalar(speed * delta);
+
+            player.position.x += move.x; if (checkCollisions(player.position)) player.position.x -= move.x;
+            player.position.z += move.z; if (checkCollisions(player.position)) player.position.z -= move.z;
+            player.position.y += velocity.y;
+            if (checkCollisions(player.position)) { player.position.y -= velocity.y; if (velocity.y < 0 && keys['Space'] && !water) velocity.y = 0.15; else velocity.y = 0; }
+            
+            if (health <= 0 || player.position.y < -15) { health = 100; oxygen = 100; player.position.set(0, 5, 0); velocity.set(0,0,0); }
+            renderer.render(scene, camera);
+        }
+        animate();
+        window.oncontextmenu = (e) => e.preventDefault();
+    </script>
+</body>
+</html>
