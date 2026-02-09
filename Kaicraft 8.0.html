@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Voxel Infinite Terrain - Option A Full</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+    }
+    canvas { display: block; }
+    #crosshair {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      width: 4px;
+      height: 4px;
+      background: white;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+<div id="crosshair"></div>
+
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+
+<script>
+// =========================
+//  BASIC THREE SETUP
+// =========================
+// ===================== SIMPLEX NOISE CLASS =====================
+class SimplexNoise {
+  constructor(seed = Math.random()) {
+    function xmur3(str) {
+      for (var i = 0, h = 1779033703 ^ str.length; i < str.length; i++) {
+        h = Math.imul(h ^ str.charCodeAt(i), 3432918353);
+        h = h << 13 | h >>> 19;
+      }
+      return function() {
+        h = Math.imul(h ^ h >>> 16, 2246822507);
+        h = Math.imul(h ^ h >>> 13, 3266489909);
+        return (h ^= h >>> 16) >>> 0;
+      };
+    }
+    function mulberry32(a) {
+      return function() {
+        var t = a += 0x6D2B79F5;
+        t = Math.imul(t ^ t >>> 15, t | 1);
+        t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+    const rand = mulberry32(xmur3(String(seed))());
+    this.p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) this.p[i] = i;
+    for (let i = 255; i > 0; i--) {
+      const n = Math.floor((i + 1) * rand());
+      const q = this.p[i];
+      this.p[i] = this.p[n];
+      this.p[n] = q;
+    }
+    this.perm = new Uint8Array(512);
+    for (let i = 0; i < 512; i++) this.perm[i] = this.p[i & 255];
+  }
+
+  noise2D(x, y) {
+    const perm = this.perm;
+    const F2 = 0.5 * (Math.sqrt(3) - 1);
+    const G2 = (3 - Math.sqrt(3)) / 6;
+
+    let n0 = 0, n1 = 0, n2 = 0;
+    const s = (x + y) * F2;
+    const i = Math.floor(x + s);
+    const j = Math.floor(y + s);
+    const t = (i + j) * G2;
+    const X0 = i - t;
+    const Y0 = j - t;
+    const x0 = x - X0;
+    const y0 = y - Y0;
+
+    let i1, j1;
+    if (x0 > y0) { i1 = 1; j1 = 0; }
+    else { i1 = 0; j1 = 1; }
+
+    const x1 = x0 - i1 + G2;
+    const y1 = y0 - j1 + G2;
+    const x2 = x0 - 1 + 2 * G2;
+    const y2 = y0 - 1 + 2 * G2;
+
+    const ii = i & 255;
+    const jj = j & 255;
+
+    function grad(hash, x, y) {
+      const h = hash & 7;
+      const u = h < 4 ? x : y;
+      const v = h < 4 ? y : x;
+      return ((h & 1) ? -u : u) + ((h & 2) ? -2 * v : 2 * v);
+    }
+
+    let t0 = 0.5 - x0 * x0 - y0 * y0;
+    if (t0 > 0) {
+      t0 *= t0;
+      n0 = t0 * t0 * grad(perm[ii + perm[jj]], x0, y0);
+    }
+
+    let t1 = 0.5 - x1 * x1 - y1 * y1;
+    if (t1 > 0) {
+      t1 *= t1;
+      n1 = t1 * t1 * grad(perm[ii + i1 + perm[jj + j1]], x1, y1);
+    }
+
+    let t2 = 0.5 - x2 * x2 - y2 * y2;
+    if (t2 > 0) {
+      t2 *= t2;
+      n2 = t2 * t2 * grad(perm[ii + 1 + perm[jj + 1]], x2, y2);
+    }
+
+    return 70 * (n0 + n1 + n2);
+  }
+
+  noise3D(x, y, z) {
+    const perm = this.perm;
+    const F3 = 1 / 3;
+    const G3 = 1 / 6;
+
+    let n0 = 0, n1 = 0, n2 = 0, n3 = 0;
+
+    const s = (x + y + z) * F3;
+    const i = Math.floor(x + s);
+    const j = Math.floor(y + s);
+    const k = Math.floor(z + s);
+
+    const t = (i + j + k) * G3;
+    const X0 = i - t;
+    const Y0 = j - t;
+    const Z0 = k - t;
+
+    const x0 = x - X0;
+    const y0 = y - Y0;
+    const z0 = z - Z0;
+
+    let i1, j1, k1;
+    let i2, j2, k2;
+
+    if (x0 >= y0) {
+      if (y0 >= z0) { i1=1; j1=0; k1=0; i2=1; j2=1; k2=0; }
+      else if (x0 >= z0) { i1=1; j1=0; k1=0; i2=1; j2=0; k2=1; }
+      else { i1=0; j1=0; k1=1; i2=1; j2=0; k2=1; }
+    } else {
+      if (y0 < z0) { i1=0; j1=0; k1=1; i2=0; j2=1; k2=1; }
+      else if (x0 < z0) { i1=0; j1=1; k1=0; i2=0; j2=1; k2=1; }
+      else { i1=0; j1=1; k1=0; i2=1; j2=1; k2=0; }
+    }
+
+    const x1 = x0 - i1 + G3;
+    const y1 = y0 - j1 + G3;
+    const z1 = z0 - k1 + G3;
+
+    const x2 = x0 - i2 + 2 * G3;
+    const y2 = y0 - j2 + 2 * G3;
+    const z2 = z0 - k2 + 2 * G3;
+
+    const x3 = x0 - 1 + 3 * G3;
+    const y3 = y0 - 1 + 3 * G3;
+    const z3 = z0 - 1 + 3 * G3;
+
+    const ii = i & 255;
+    const jj = j & 255;
+    const kk = k & 255;
+
+    function grad(hash, x, y, z) {
+      const h = hash & 15;
+      const u = h < 8 ? x : y;
+      const v = h < 4 ? y : (h === 12 || h === 14 ? x : z);
+      return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
+    }
+
+    let t0 = 0.6 - x0*x0 - y0*y0 - z0*z0;
+    if (t0 > 0) {
+      t0 *= t0;
+      n0 = t0 * t0 * grad(perm[ii + perm[jj + perm[kk]]], x0, y0, z0);
+    }
+
+    let t1 = 0.6 - x1*x1 - y1*y1 - z1*z1;
+    if (t1 > 0) {
+      t1 *= t1;
+      n1 = t1 * t1 * grad(perm[ii + i1 + perm[jj + j1 + perm[kk + k1]]], x1, y1, z1);
+    }
+
+    let t2 = 0.6 - x2*x2 - y2*y2 - z2*z2;
+    if (t2 > 0) {
+      t2 *= t2;
+      n2 = t2 * t2 * grad(perm[ii + i2 + perm[jj + j2 + perm[kk + k2]]], x2, y2, z2);
+    }
+
+    let t3 = 0.6 - x3*x3 - y3*y3 - z3*z3;
+    if (t3 > 0) {
+      t3 *= t3;
+      n3 = t3 * t3 * grad(perm[ii + 1 + perm[jj + 1 + perm[kk + 1]]], x3, y3, z3);
+    }
+
+    return 32 * (n0 + n1 + n2 + n3);
+  }
+}
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+
+const camera = new THREE.PerspectiveCamera(
+  75,
+  window.innerWidth / window.innerHeight,
+  0.01,
+  1000
+);
+camera.position.set(0, 32, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Pointer lock on click
+renderer.domElement.addEventListener("click", () => {
+  renderer.domElement.requestPointerLock();
+});
+// Global selected block
+window.addEventListener("keydown", handleBlockSelection);
+
+
+
+// =========================
+//  CONSTANTS
+// =========================
+const CHUNK_SIZE = 16;
+const WORLD_HEIGHT = 64;
+const RENDER_DISTANCE = 3;
+
+// =========================
+ //  BLOCK DEFINITIONS
+// =========================
+AIR = null;
+const BLOCK = {
+  GRASS: { top: 1, bottom: 12, sides: 0 },
+  LOG:   { top: 9, bottom: 9, sides: 3 },
+
+  PLANKS: 2,
+  STONE: 4,
+  COBBLESTONE: 5,
+  WATER: 6,
+  LAVA: 7,
+  IRON_ORE: 8,
+  GOLD_ORE: 10,
+  DIAMOND_ORE: 11,
+  DIRT: 12,
+  OAK_LEAVES: 13
+};
+let selectedBlock = BLOCK.GRASS; // default to block ID 1
+
+function handleBlockSelection(e) {
+    switch (e.key) {
+        case "1": selectedBlock = BLOCK.GRASS; break;
+        case "2": selectedBlock = BLOCK.DIRT; break;
+        case "3": selectedBlock = BLOCK.PLANKS; break;
+        case "4": selectedBlock = BLOCK.LOG; break;
+        case "5": selectedBlock = BLOCK.STONE; break;
+        case "6": selectedBlock = BLOCK.COBBLESTONE; break;
+        case "7": selectedBlock = BLOCK.IRON_ORE; break;
+        case "8": selectedBlock = BLOCK.GOLD_ORE; break;
+        case "9": selectedBlock = BLOCK.DIAMOND_ORE; break;
+    }
+}
+const ATLAS_COLS = 8;
+const ATLAS_ROWS = 8;
+
+// =========================
+//  LOAD ATLAS (PASTE BASE64 BELOW)
+// =========================
+const atlasTexture = new THREE.TextureLoader().load(
+  "data:image/png;base64,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"
+);
+atlasTexture.magFilter = THREE.NearestFilter;
+atlasTexture.minFilter = THREE.NearestFilter;
+
+// =========================
+//  MATERIALS
+// =========================
+const solidMat = new THREE.MeshBasicMaterial({
+  map: atlasTexture
+});
+solidMat.renderOrder = 1;
+
+const waterMat = new THREE.MeshBasicMaterial({
+  map: atlasTexture,
+  transparent: true,
+  opacity: 0.55,
+  depthWrite: false,
+  depthTest: true
+});
+waterMat.renderOrder = 2;
+
+const leavesMat = new THREE.MeshBasicMaterial({
+  map: atlasTexture,
+  transparent: true,
+  alphaTest: 0.3,
+  depthWrite: false
+});
+leavesMat.renderOrder = 9999;
+
+
+
+
+// =========================
+//  PERLIN NOISE
+// =========================
+const Perlin = (function() {
+  const p = new Uint8Array(512);
+  const perm = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) perm[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = perm[i];
+    perm[i] = perm[j];
+    perm[j] = tmp;
+  }
+  for (let i = 0; i < 512; i++) p[i] = perm[i & 255];
+
+  function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+  function lerp(t, a, b) { return a + t * (b - a); }
+  function grad(hash, x, y) {
+    const h = hash & 3;
+    const u = h < 2 ? x : y;
+    const v = h < 2 ? y : x;
+    return ((h & 1) ? -u : u) + ((h & 2) ? -2.0 * v : 2.0 * v);
+  }
+
+  function noise2D(x, y) {
+    const X = Math.floor(x) & 255;
+    const Y = Math.floor(y) & 255;
+
+    x -= Math.floor(x);
+    y -= Math.floor(y);
+
+    const u = fade(x);
+    const v = fade(y);
+
+    const aa = p[p[X] + Y];
+    const ab = p[p[X] + Y + 1];
+    const ba = p[p[X + 1] + Y];
+    const bb = p[p[X + 1] + Y + 1];
+
+    const x1 = lerp(u, grad(aa, x, y), grad(ba, x - 1, y));
+    const x2 = lerp(u, grad(ab, x, y - 1), grad(bb, x - 1, y - 1));
+    return (lerp(v, x1, x2) + 1) / 2;
+  }
+
+  return { noise2D };
+})();
+
+// =========================
+//  UV MAPPING (OPTION A)
+// =========================
+function applyCubeUVs(geo, block) {
+  const uv = geo.attributes.uv;
+
+  const tiles = [
+    block.sides ?? block, // right
+    block.sides ?? block, // left
+    block.top   ?? block, // top
+    block.bottom?? block, // bottom
+    block.sides ?? block, // front
+    block.sides ?? block  // back
+  ];
+
+  for (let face = 0; face < 6; face++) {
+    const tile = tiles[face];
+    const col = tile % ATLAS_COLS;
+    const row = Math.floor(tile / ATLAS_COLS);
+
+    const u0 = col / ATLAS_COLS;
+    const v0 = 1 - (row + 1) / ATLAS_ROWS;
+    const u1 = (col + 1) / ATLAS_COLS;
+    const v1 = 1 - row / ATLAS_ROWS;
+
+    const base = face * 6;
+
+    uv.setXY(base + 0, u0, v1);
+    uv.setXY(base + 1, u0, v0);
+    uv.setXY(base + 2, u1, v1);
+    uv.setXY(base + 3, u0, v0);
+    uv.setXY(base + 4, u1, v0);
+    uv.setXY(base + 5, u1, v1);
+  }
+
+  uv.needsUpdate = true;
+}
+
+// =========================
+//  WORLD DATA
+// =========================
+const world = {};  // "cx,cz" -> blocks array
+const chunks = {}; // "cx,cz" -> THREE.Group
+
+function chunkKey(cx, cz) {
+  return cx + "," + cz;
+}
+
+// =========================
+//  CHUNK GENERATION
+// =========================
+function placeTree(blocks, x, y, z) {
+  // Height of the trunk
+  const height = 4 + Math.floor(Math.random() * 2);
+
+  // Build trunk
+  for (let i = 0; i < height; i++) {
+    if (y + i < WORLD_HEIGHT)
+      blocks[x][y + i][z] = BLOCK.LOG;
+  }
+
+  const topY = y + height;
+
+  // Leaves cube (3×3×3)
+  for (let lx = -2; lx <= 2; lx++) {
+    for (let ly = -2; ly <= 2; ly++) {
+      for (let lz = -2; lz <= 2; lz++) {
+        const ax = x + lx;
+        const ay = topY + ly;
+        const az = z + lz;
+
+        // Bounds check
+        if (
+          ax < 0 || ax >= CHUNK_SIZE ||
+          ay < 0 || ay >= WORLD_HEIGHT ||
+          az < 0 || az >= CHUNK_SIZE
+        ) continue;
+
+        // Make a sphere-ish leaf blob
+        const dist = Math.abs(lx) + Math.abs(ly) + Math.abs(lz);
+        if (dist < 4) {
+          blocks[ax][ay][az] = BLOCK.OAK_LEAVES;
+        }
+      }
+    }
+  }
+}
+// ===================== CAVES =====================
+function carveCaves(blocks, cx, cz) {
+  const CHUNK_SIZE = 16;
+  const WORLD_HEIGHT = 64;
+
+  for (let x = 0; x < CHUNK_SIZE; x++) {
+    for (let y = 5; y < 40; y++) {
+      for (let z = 0; z < CHUNK_SIZE; z++) {
+
+        const wx = cx * CHUNK_SIZE + x;
+        const wz = cz * CHUNK_SIZE + z;
+
+        // 3D noise for caves
+        const n = simplex.noise3D(
+          wx * 0.08,
+          y  * 0.08,
+          wz * 0.08
+        );
+
+        // Threshold controls cave size
+        if (n < -0.35) {
+          // Only carve stone/dirt, not grass or water
+          if (
+            blocks[x][y][z] === BLOCK.STONE ||
+            blocks[x][y][z] === BLOCK.DIRT
+          ) {
+            blocks[x][y][z] = AIR;
+          }
+        }
+      }
+    }
+  }
+}
+// GLOBAL NOISE INSTANCE
+const simplex = new SimplexNoise("seed");
+
+function generateChunkBlocks(cx, cz) {
+  const blocks = [];
+
+  // Allocate chunk array
+  for (let x = 0; x < CHUNK_SIZE; x++) {
+    blocks[x] = [];
+    for (let y = 0; y < WORLD_HEIGHT; y++) {
+      blocks[x][y] = [];
+      for (let z = 0; z < CHUNK_SIZE; z++) {
+        blocks[x][y][z] = null;
+      }
+    }
+  }
+
+  const wx0 = cx * CHUNK_SIZE;
+  const wz0 = cz * CHUNK_SIZE;
+
+  const waterLevel = 25;
+
+  // ===== TERRAIN GENERATION =====
+  for (let x = 0; x < CHUNK_SIZE; x++) {
+    for (let z = 0; z < CHUNK_SIZE; z++) {
+
+      const wx = wx0 + x;
+      const wz = wz0 + z;
+
+      // Perlin height
+      const n = Perlin.noise2D(wx * 0.05, wz * 0.05);
+      const height = Math.floor(20 + n * 20);
+
+      // Build column
+      for (let y = 0; y <= height; y++) {
+        if (y === height) blocks[x][y][z] = BLOCK.GRASS;
+        else if (y > height - 3) blocks[x][y][z] = BLOCK.DIRT;
+        else blocks[x][y][z] = BLOCK.STONE;
+      }
+
+      // Water fill
+      for (let y = height + 1; y <= waterLevel; y++) {
+        blocks[x][y][z] = BLOCK.WATER;
+      }
+    }
+  }
+
+  // ===== TREE GENERATION =====
+  // Lower chance = fewer trees
+  const treeChance = 0.005; // 0.5% per column (was 2%)
+
+  for (let x = 0; x < CHUNK_SIZE; x++) {
+    for (let z = 0; z < CHUNK_SIZE; z++) {
+
+      if (Math.random() < treeChance) {
+
+        // Find topmost grass block
+        for (let y = WORLD_HEIGHT - 1; y >= 1; y--) {
+
+          if (blocks[x][y][z] === BLOCK.GRASS) {
+
+            // Prevent ocean trees
+            if (y <= waterLevel) break;
+
+            // Place tree one block above grass
+            placeTree(blocks, x, y + 1, z);
+            break;
+          }
+        }
+      }
+    }
+  }
+carveCaves(blocks, cx, cz);
+// ===================== ORES =====================
+for (let x = 0; x < CHUNK_SIZE; x++) {
+  for (let y = 5; y < WORLD_HEIGHT; y++) {
+    for (let z = 0; z < CHUNK_SIZE; z++) {
+
+      // Only replace stone
+      if (blocks[x][y][z] !== BLOCK.STONE) continue;
+
+      const wx = cx * CHUNK_SIZE + x;
+      const wz = cz * CHUNK_SIZE + z;
+
+      // Noise for ore placement
+      const oreNoise = simplex.noise3D(wx * 0.15, y * 0.15, wz * 0.15);
+
+      // Iron (common)
+      if (oreNoise > 0.55 && y < 50) {
+        blocks[x][y][z] = BLOCK.IRON_ORE;
+      }
+
+      // Gold (rare)
+      if (oreNoise > 0.70 && y < 35) {
+        blocks[x][y][z] = BLOCK.GOLD_ORE;
+      }
+
+      // Diamond (very rare)
+      if (oreNoise > 0.80 && y < 20) {
+        blocks[x][y][z] = BLOCK.DIAMOND_ORE;
+      }
+    }
+  }
+}
+
+  return blocks;
+}
+
+// =========================
+//  BUILD CHUNK (OPTION A)
+// =========================
+function buildChunkMesh(blocks, cx, cz) {
+  const group = new THREE.Group();
+  const blockTypes = {};
+
+  // Group blocks by type so each InstancedMesh uses one material
+  for (let x = 0; x < CHUNK_SIZE; x++) {
+    for (let y = 0; y < WORLD_HEIGHT; y++) {
+      for (let z = 0; z < CHUNK_SIZE; z++) {
+        const block = blocks[x][y][z];
+        if (!block) continue;
+
+        const key = JSON.stringify(block);
+        if (!blockTypes[key]) blockTypes[key] = [];
+
+        blockTypes[key].push([
+          cx * CHUNK_SIZE + x,
+          y,
+          cz * CHUNK_SIZE + z
+        ]);
+      }
+    }
+  }
+
+  // Build InstancedMeshes
+  for (const key in blockTypes) {
+    const block = JSON.parse(key);
+    const positions = blockTypes[key];
+
+    // Base cube geometry
+    const geo = new THREE.BoxGeometry(1, 1, 1).toNonIndexed();
+    applyCubeUVs(geo, block);
+
+    // Choose correct material
+    let mat = solidMat;
+
+    if (block === BLOCK.WATER) {
+      mat = waterMat;
+    } else if (block === BLOCK.OAK_LEAVES) {
+      mat = leavesMat;
+    }
+
+    // Create instanced mesh
+    const inst = new THREE.InstancedMesh(geo, mat, positions.length);
+    const dummy = new THREE.Object3D();
+
+    for (let i = 0; i < positions.length; i++) {
+      const [x, y, z] = positions[i];
+      dummy.position.set(x + 0.5, y + 0.5, z + 0.5);
+      dummy.updateMatrix();
+      inst.setMatrixAt(i, dummy.matrix);
+    }
+
+    // IMPORTANT: compute bounds so raycasting works
+    inst.computeBoundingBox();
+    inst.computeBoundingSphere();
+
+    group.add(inst);
+  }
+
+  return group;
+}
+
+
+// =========================
+//  CHUNK MANAGER
+// =========================
+function ensureChunk(cx, cz) {
+  const key = chunkKey(cx, cz);
+  if (chunks[key]) return;
+
+  let blocks = world[key];
+  if (!blocks) {
+    blocks = generateChunkBlocks(cx, cz);
+    world[key] = blocks;
+  }
+
+  const mesh = buildChunkMesh(blocks, cx, cz);
+  scene.add(mesh);
+  chunks[key] = mesh;
+}
+
+function updateChunksAroundPlayer() {
+  const px = camera.position.x;
+  const pz = camera.position.z;
+
+  const cx = Math.floor(px / CHUNK_SIZE);
+  const cz = Math.floor(pz / CHUNK_SIZE);
+
+  const needed = new Set();
+
+  for (let dx = -RENDER_DISTANCE; dx <= RENDER_DISTANCE; dx++) {
+    for (let dz = -RENDER_DISTANCE; dz <= RENDER_DISTANCE; dz++) {
+      const ncx = cx + dx;
+      const ncz = cz + dz;
+      const key = chunkKey(ncx, ncz);
+      needed.add(key);
+      ensureChunk(ncx, ncz);
+    }
+  }
+
+  for (const key in chunks) {
+    if (!needed.has(key)) {
+      const mesh = chunks[key];
+      scene.remove(mesh);
+      mesh.traverse(obj => {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) obj.material.dispose();
+      });
+      delete chunks[key];
+    }
+  }
+}
+
+// =========================
+//  INPUT & CAMERA
+// =========================
+const keys2 = {};
+window.addEventListener("keydown", (e) => keys2[e.code] = true);
+window.addEventListener("keyup", (e) => keys2[e.code] = false);
+
+let yaw = 0;
+let pitch = 0;
+
+document.addEventListener("mousemove", (e) => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+
+  const sensitivity = 0.002;
+  yaw -= e.movementX * sensitivity;
+  pitch -= e.movementY * sensitivity;
+
+  pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch));
+});
+
+function updateCamera(dt) {
+  const speed = 10;
+
+  const forward = new THREE.Vector3(
+    -Math.sin(yaw),
+    0,
+    -Math.cos(yaw)
+  );
+  const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0,1,0)).negate();
+
+if (keys["KeyW"]) tryMove(forward,  speed * dt);
+if (keys["KeyS"]) tryMove(forward, -speed * dt);
+if (keys["KeyA"]) tryMove(right,    speed * dt);
+if (keys["KeyD"]) tryMove(right,   -speed * dt);
+if (keys["Space"])     tryMove({x:0,y:1,z:0},  speed * dt);
+if (keys["ShiftLeft"]) tryMove({x:0,y:-1,z:0}, speed * dt);
+
+
+  camera.rotation.order = "YXZ";
+  camera.rotation.y = yaw;
+  camera.rotation.x = pitch;
+}
+const keys = {};
+window.addEventListener("keydown", (e) => {
+    keys[e.code] = true;
+});
+
+window.addEventListener("keyup", (e) => {
+    keys[e.code] = false;
+});
+
+window.addEventListener("keydown", (e) => {
+    if (e.code === "KeyP") {
+        breakBlock({ button: 2 }); // right click = place
+    }
+    if (e.code === "KeyB") {
+        breakBlock({ button: 0 }); // left click = break
+    }
+});
+
+// =========================
+//  RAYCAST & BLOCK BREAKING
+// =========================
+function breakBlock(e) {
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+
+  const pos = camera.position.clone();
+
+  const maxDist = 6;
+  const step = 0.1;
+
+  let last = pos.clone(); // previous ray position
+
+  for (let d = 0; d < maxDist; d += step) {
+    const check = pos.clone().addScaledVector(dir, d);
+
+    const bx = Math.floor(check.x);
+    const by = Math.floor(check.y);
+    const bz = Math.floor(check.z);
+
+    const cx = Math.floor(bx / CHUNK_SIZE);
+    const cz = Math.floor(bz / CHUNK_SIZE);
+    const key = chunkKey(cx, cz);
+
+    const blocks = world[key];
+    if (!blocks) {
+      last.copy(check);
+      continue;
+    }
+
+    const lx = bx - cx * CHUNK_SIZE;
+    const lz = bz - cz * CHUNK_SIZE;
+
+    if (lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE || by < 0 || by >= WORLD_HEIGHT) {
+      last.copy(check);
+      continue;
+    }
+
+    const block = blocks[lx][by][lz];
+
+    if (block !== null && block !== undefined) {
+
+      // ============================
+      // FACE NORMAL USING LAST POSITION
+      // ============================
+      const nx = Math.floor(last.x) - bx;
+      const ny = Math.floor(last.y) - by;
+      const nz = Math.floor(last.z) - bz;
+
+      // ============================
+      // LEFT CLICK → BREAK BLOCK
+      // ============================
+      if (e.button === 0) {
+        blocks[lx][by][lz] = null;
+      }
+
+      // ============================
+      // RIGHT CLICK → PLACE NEXT TO FACE
+      // ============================
+      let pkey = key, pcx = cx, pcz = cz, pblocks = blocks;
+
+      if (e.button === 2) {
+        const px = bx + nx;
+        const py = by + ny;
+        const pz = bz + nz;
+
+        pcx = Math.floor(px / CHUNK_SIZE);
+        pcz = Math.floor(pz / CHUNK_SIZE);
+        pkey = chunkKey(pcx, pcz);
+
+        pblocks = world[pkey];
+        if (pblocks) {
+          const plx = px - pcx * CHUNK_SIZE;
+          const plz = pz - pcz * CHUNK_SIZE;
+
+          if (plx >= 0 && plx < CHUNK_SIZE && plz >= 0 && plz < CHUNK_SIZE && py >= 0 && py < WORLD_HEIGHT) {
+            if (selectedBlock !== BLOCK.WATER && selectedBlock !== BLOCK.LAVA) {
+              pblocks[plx][py][plz] = selectedBlock;
+            }
+          }
+        }
+      }
+
+      // ============================
+      // REBUILD THE CORRECT CHUNK
+      // ============================
+      const rebuildKey = (e.button === 2) ? pkey : key;
+      const rebuildCx  = (e.button === 2) ? pcx  : cx;
+      const rebuildCz  = (e.button === 2) ? pcz  : cz;
+      const rebuildBlocks = (e.button === 2) ? pblocks : blocks;
+
+      const old = chunks[rebuildKey];
+      scene.remove(old);
+
+      old.traverse(obj => {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) obj.material.dispose();
+      });
+
+      const newMesh = buildChunkMesh(rebuildBlocks, rebuildCx, rebuildCz);
+
+      newMesh.traverse(obj => {
+        if (obj.isInstancedMesh) {
+          obj.computeBoundingBox();
+          obj.computeBoundingSphere();
+        }
+      });
+
+      scene.add(newMesh);
+      chunks[rebuildKey] = newMesh;
+
+      return;
+    }
+
+    last.copy(check);
+  }
+}
+
+window.addEventListener("mousedown", breakBlock);
+
+
+// =========================
+//  MAIN LOOP
+// =========================
+let lastTime = performance.now();
+function doCollisions() {
+
+    const PLAYER_WIDTH = 0.4;
+    const PLAYER_HEIGHT = 1.8;
+
+    // Save old position BEFORE movement
+    const oldX = camera.position.x;
+    const oldY = camera.position.y;
+    const oldZ = camera.position.z;
+
+    // =========================
+    // X AXIS COLLISION
+    // =========================
+    {
+        const bx1 = Math.floor(camera.position.x - PLAYER_WIDTH);
+        const bx2 = Math.floor(camera.position.x + PLAYER_WIDTH);
+        const by1 = Math.floor(camera.position.y);
+        const by2 = Math.floor(camera.position.y + PLAYER_HEIGHT);
+        const bz  = Math.floor(camera.position.z);
+
+        let blocked = false;
+
+        for (let y = by1; y <= by2; y++) {
+
+            const test = (bx) => {
+                const cx = Math.floor(bx / CHUNK_SIZE);
+                const cz = Math.floor(bz / CHUNK_SIZE);
+                const key = chunkKey(cx, cz);
+                const blocks = world[key];
+                if (!blocks) return;
+
+                const lx = bx - cx * CHUNK_SIZE;
+                const lz = bz - cz * CHUNK_SIZE;
+
+                if (blocks[lx] && blocks[lx][y] && blocks[lx][y][lz] !== null) {
+                    blocked = true;
+                }
+            };
+
+            test(bx1);
+            test(bx2);
+        }
+
+        if (blocked) camera.position.x = oldX;
+    }
+
+    // =========================
+    // Y AXIS COLLISION
+    // =========================
+    {
+        const bx = Math.floor(camera.position.x);
+        const by1 = Math.floor(camera.position.y);
+        const by2 = Math.floor(camera.position.y + PLAYER_HEIGHT);
+        const bz = Math.floor(camera.position.z);
+
+        let blocked = false;
+
+        for (let y = by1; y <= by2; y++) {
+            const cx = Math.floor(bx / CHUNK_SIZE);
+            const cz = Math.floor(bz / CHUNK_SIZE);
+            const key = chunkKey(cx, cz);
+            const blocks = world[key];
+            if (!blocks) continue;
+
+            const lx = bx - cx * CHUNK_SIZE;
+            const lz = bz - cz * CHUNK_SIZE;
+
+            if (blocks[lx] && blocks[lx][y] && blocks[lx][y][lz] !== null) {
+                blocked = true;
+            }
+        }
+
+        if (blocked) camera.position.y = oldY;
+    }
+
+    // =========================
+    // Z AXIS COLLISION
+    // =========================
+    {
+        const bx = Math.floor(camera.position.x);
+        const by1 = Math.floor(camera.position.y);
+        const by2 = Math.floor(camera.position.y + PLAYER_HEIGHT);
+        const bz1 = Math.floor(camera.position.z - PLAYER_WIDTH);
+        const bz2 = Math.floor(camera.position.z + PLAYER_WIDTH);
+
+        let blocked = false;
+
+        for (let y = by1; y <= by2; y++) {
+
+            const test = (bz) => {
+                const cx = Math.floor(bx / CHUNK_SIZE);
+                const cz = Math.floor(bz / CHUNK_SIZE);
+                const key = chunkKey(cx, cz);
+                const blocks = world[key];
+                if (!blocks) return;
+
+                const lx = bx - cx * CHUNK_SIZE;
+                const lz = bz - cz * CHUNK_SIZE;
+
+                if (blocks[lx] && blocks[lx][y] && blocks[lx][y][lz] !== null) {
+                    blocked = true;
+                }
+            };
+
+            test(bz1);
+            test(bz2);
+        }
+
+        if (blocked) camera.position.z = oldZ;
+    }
+}
+function isSolidAt(x, y, z) {
+    const bx = Math.floor(x);
+    const by = Math.floor(y);
+    const bz = Math.floor(z);
+
+    const cx = Math.floor(bx / CHUNK_SIZE);
+    const cz = Math.floor(bz / CHUNK_SIZE);
+    const key = chunkKey(cx, cz);
+    const blocks = world[key];
+    if (!blocks) return false;
+
+    const lx = bx - cx * CHUNK_SIZE;
+    const ly = Math.floor(y); // player feet
+    const lz = bz - cz * CHUNK_SIZE;
+
+    const block = blocks[lx]?.[ly]?.[lz];
+
+    // Air = not solid
+    if (block === null || block === undefined) return false;
+
+    // Water = not solid
+    if (block === BLOCK.WATER) return false;
+
+    // Everything else = solid
+    return true;
+}
+
+function tryMove(dir, amount) {
+    const nx = camera.position.x + dir.x * amount;
+    const ny = camera.position.y + dir.y * amount;
+    const nz = camera.position.z + dir.z * amount;
+
+    // If next position is inside a block → block movement
+    if (isSolidAt(nx, ny, nz)) return;
+
+    // Otherwise apply movement
+    camera.position.set(nx, ny, nz);
+}
+let velocityY = 0;
+let canJump = false;
+
+const GRAVITY = -0.01;
+const JUMP_FORCE = 0.18;
+const TERMINAL_VELOCITY = -0.4;
+function updatePlayerPhysics() {
+
+    // 1. Gravity
+    velocityY += GRAVITY;
+    if (velocityY < TERMINAL_VELOCITY) velocityY = TERMINAL_VELOCITY;
+
+    // 2. Move vertically
+    camera.position.y += velocityY;
+
+    // 3. Ground collision
+    const feetX = camera.position.x;
+    const feetY = camera.position.y - 1.6;
+    const feetZ = camera.position.z;
+
+    if (isSolidAt(feetX, feetY, feetZ)) {
+        const blockY = Math.floor(feetY);
+        camera.position.y = blockY + 1.6;
+        velocityY = 0;
+        canJump = true;
+    }
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+    if (keys["ArrowLeft"])  yaw += 0.05;
+    if (keys["ArrowRight"]) yaw -= 0.05;
+    if (keys["ArrowUp"])    pitch += 0.05;
+    if (keys["ArrowDown"])  pitch -= 0.05;
+
+    // Apply rotation
+    camera.rotation.order = "YXZ";
+    camera.rotation.y = yaw;
+    camera.rotation.x = pitch;
+  updateCamera(dt);
+  updateChunksAroundPlayer();
+
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+
+</body>
+</html>
