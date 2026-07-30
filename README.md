@@ -4,3 +4,4 @@ This is my project Kaicraft. It's like Minecraft except I listen to the communit
 
 CREDITS:
 Kai Brotzman (Me) for making the game.
+<img width="1366" height="668" alt="Sneak Peak" src="https://github.com/user-attachments/assets/96d5893c-f42d-4976-b267-ca20b630e0ae" />
