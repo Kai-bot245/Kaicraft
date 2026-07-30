@@ -1,4 +1,4 @@
-This is my project Kaicraft. It's like Minecraft except I listen to the community LOL I will try to add every feature you guys want me too
+This is my project Kaicraft. It's like Minecraft except I listen to the community LOL I will try to add every feature you guys want me to?
 
 
 
